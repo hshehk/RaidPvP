@@ -27,13 +27,13 @@ tasks.withType<JavaCompile>().configureEach {
     options.release.set(21)
 }
 
-processResources {
+tasks.processResources {
     filesMatching("plugin.yml") {
         expand("version" to project.version)
     }
 }
 
-jar {
+tasks.jar {
     archiveBaseName.set("RaidPvP")
 }
 
