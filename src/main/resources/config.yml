@@ -1,0 +1,149 @@
+# RaidPvP v1.0.0
+# Paper / Purpur / Folia 1.21.4+; Java 21 bytecode.
+# Newly added keys fall back to built-in defaults, so an older config.yml keeps working.
+
+settings:
+  # RaidPvP does nothing in these worlds (no PvP rules, no combat tag, no newbie/respawn protection).
+  disabled-worlds: []
+  pvp-toggle:
+    # false = /pvp is disabled and EVERY player follows default-enabled (false = PvP off for everyone).
+    enabled: true
+    default-enabled: true
+    change-cooldown-seconds: 10
+
+combat:
+  enabled: true
+  duration-seconds: 15
+  refresh-on-hit: true
+  actionbar:
+    enabled: true
+    message: "&c⚔ 戰鬥中 &7| &f%time%s &7| &c對手: &f%enemy%"
+  bossbar:
+    enabled: true
+    color: RED
+    style: SOLID
+    message: "&c⚔ 戰鬥狀態 &7| &f%time%s &7| &c對手: &f%enemy%"
+  messages:
+    on-enter: "&c⚔ 你進入戰鬥！ &7(%time%s)"
+    on-exit: "&a✔ 你已脫離戰鬥。"
+    on-attack-newbie: "&e%player% &f目前有新手保護。"
+  restrictions:
+    block-commands: true
+    command-mode: "BLACKLIST" # BLACKLIST or WHITELIST
+    commands:
+      - "tp"
+      - "teleport"
+      - "spawn"
+      - "home"
+      - "homes"
+      - "tpa"
+      - "tpahere"
+      - "warp"
+      - "rtp"
+      - "back"
+      - "fly"
+      - "gamemode"
+      - "gmc"
+      - "gms"
+      - "gm"
+    block-teleport: true
+    block-ender-pearl: true
+    block-chorus-fruit: true
+    block-spectate: true
+    block-block-place: true
+    block-block-break: true
+    block-interact: false
+    block-container-open: false
+    blocked-interact-materials: []
+    close-inventory-on-tag: true
+    disable-fly: true
+    disable-gamemode: true
+    disable-invisibility: true
+    prevent-totem: false
+    blocked-items:
+      - "ENDER_CHEST"
+      - "RESPAWN_ANCHOR"
+  item-cooldowns:
+    enabled: true
+    ENDER_PEARL: 10
+    FIREWORK_ROCKET: 1.5
+    CHORUS_FRUIT: 5
+    TRIDENT: 1
+    GOLDEN_APPLE: 0
+
+combat-log:
+  # NONE, KILL or NPC. NPC requires Citizens; without Citizens it falls back to KILL.
+  mode: "KILL"
+  punish-on-kick: true
+  # Kicks with these PlayerKickEvent causes are never punished (admin kick, restart, ban...).
+  # Server shutdown is always exempt.
+  kick-exempt-causes:
+    - "KICK_COMMAND"
+    - "RESTART_COMMAND"
+    - "PLUGIN"
+    - "BANNED"
+    - "IP_BANNED"
+    - "NOT_WHITELISTED"
+    - "SERVER_FULL"
+  block-login-while-npc-exists: true
+  npc:
+    name: "%player%"
+    # If nobody kills the NPC within this time it disappears and the owner gets everything back on next login.
+    despawn-seconds: 120
+    # true = a killed NPC drops the owner's items / XP. false = the owner keeps them and gets them on next login.
+    # Items are saved in pending.yml, so they survive restarts and crashes.
+    drop-inventory: true
+    drop-experience: true
+    keep-chunk-loaded: false
+  broadcast: true
+  broadcast-message: "&c%player% &7戰鬥中登出。"
+
+newbie:
+  enabled: true
+  duration-minutes: 30
+  protect-from-pvp: true
+  protect-from-everything: false
+  block-pickup: false
+  message:
+    join: "&a新手保護啟動：&f%time% 分鐘&a。使用 &e/newbie disable &a可主動關閉。"
+    disabled: "&c你已關閉新手保護。"
+    time: "&e新手保護剩餘 &f%time% &e秒。"
+    protected: "&e你目前受到新手保護，無法參與 PvP。"
+
+respawn-protection:
+  enabled: true
+  seconds: 2
+
+anti-kill-abuse:
+  enabled: true
+  max-kills: 5
+  window-seconds: 60
+  # Combat-logout deaths never count. '&' colour codes are converted for you.
+  command: "kick %player% &c禁止短時間重複擊殺同一玩家。"
+
+messages:
+  no-permission: "&c你沒有權限。"
+  player-only: "&c這個指令只能由玩家使用。"
+  reload: "&aRaidPvP 設定已重新載入。"
+  combat-time: "&c你還在戰鬥中：&f%time% 秒。"
+  not-in-combat: "&a你目前不在戰鬥中。"
+  pvp-enabled: "&aPvP 已開啟。"
+  pvp-disabled: "&ePvP 已關閉。"
+  pvp-cooldown: "&c請等待 &f%time% &c秒後再切換 PvP。"
+  command-blocked: "&c戰鬥中不能使用這個指令。"
+  teleport-blocked: "&c戰鬥中禁止傳送。"
+  pearl-blocked: "&c戰鬥中禁止使用終界珍珠。"
+  chorus-blocked: "&c戰鬥中禁止使用歌萊果。"
+  build-blocked: "&c戰鬥中不能放置或破壞方塊。"
+  item-blocked: "&c戰鬥中不能使用這個物品。"
+  interact-blocked: "&c戰鬥中不能互動。"
+  container-blocked: "&c戰鬥中不能開啟容器。"
+  spectate-blocked: "&c戰鬥中禁止進入觀察者模式。"
+  gamemode-blocked: "&c戰鬥中禁止切換到此遊戲模式。"
+  item-cooldown: "&c這個物品冷卻中：&f%time% 秒。"
+  totem-blocked: "&c戰鬥中禁止使用不死圖騰。"
+  npc-unavailable: "&eCitizens 未安裝，戰鬥登出已改為直接死亡處理。"
+  npc-returned: "&a你戰鬥登出時留下的物品與經驗已歸還。"
+  pvp-status: "&7PvP 狀態：%status%"
+  status-enabled: "&a開啟"
+  status-disabled: "&c關閉"

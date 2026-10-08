@@ -1,0 +1,45 @@
+name: RaidPvP
+version: ${version}
+main: me.tsukieru.raidpvp.RaidPvPPlugin
+api-version: '1.21.4'
+folia-supported: true
+author: Tsukieru
+description: Production-ready combat manager for raiding PvP servers.
+softdepend:
+  - Citizens
+commands:
+  raidpvp:
+    description: RaidPvP administration and status commands.
+    usage: /raidpvp <reload|status|tag|untag|newbie>
+    aliases: [rpvp]
+  pvptag:
+    description: Shows your current combat tag.
+    usage: /pvptag
+  newbie:
+    description: Shows or disables newbie protection.
+    usage: /newbie [disable]
+  pvp:
+    description: Toggles your PvP status.
+    usage: /pvp [on|off]
+permissions:
+  raidpvp.admin:
+    description: Access to RaidPvP administration commands.
+    default: op
+  raidpvp.bypass.combat:
+    description: Bypass combat tagging and combat restrictions.
+    default: op
+  raidpvp.bypass.newbie:
+    description: Bypass newbie protection restrictions.
+    default: op
+  raidpvp.bypass.command:
+    description: Bypass combat command restrictions.
+    default: op
+  raidpvp.bypass.item:
+    description: Bypass combat item restrictions.
+    default: op
+  raidpvp.bypass.teleport:
+    description: Bypass combat teleport restrictions.
+    default: op
+  raidpvp.bypass.build:
+    description: Bypass combat block place/break restrictions.
+    default: op
