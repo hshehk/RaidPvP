@@ -31,7 +31,7 @@ public final class NewbieCommand implements CommandExecutor, TabCompleter {
         if (args.length == 0) {
             long remaining = combat.newbieRemainingSeconds(player.getUniqueId());
             if (remaining <= 0L) {
-                player.sendMessage(Text.color("&7你目前沒有新手保護。"));
+                player.sendMessage(Text.color(config.message("newbie-none")));
             } else {
                 combat.send(player, Text.replace(config.newbieTimeMessage(), "%time%", String.valueOf(remaining)));
             }
@@ -42,7 +42,7 @@ public final class NewbieCommand implements CommandExecutor, TabCompleter {
             combat.send(player, config.newbieDisabledMessage());
             return true;
         }
-        player.sendMessage(Text.color("&e用法：/newbie [disable]"));
+        player.sendMessage(Text.color(config.message("newbie-usage")));
         return true;
     }
 

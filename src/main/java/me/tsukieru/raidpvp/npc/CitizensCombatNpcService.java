@@ -10,7 +10,10 @@ import net.citizensnpcs.api.npc.NPCRegistry;
 import net.citizensnpcs.trait.SkinTrait;
 import org.bukkit.Location;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.World;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
@@ -30,6 +33,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -37,12 +42,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * Combat-logout NPCs backed by Citizens.
  *
  * <p>The logged-out player's inventory and experience are written to {@code pending.yml} <em>before</em> the
- * player data is cleared. They stay there until one of these happens:
+ * player data is cleared. The NPC stands still (no knockback). Then:
  * <ul>
- *   <li>the NPC is killed and {@code drop-inventory} / {@code drop-experience} are enabled: the matching part
- *       is dropped and removed from the file;</li>
- *   <li>otherwise (NPC survived / expired, drop disabled, server restarted or crashed): the player gets
- *       everything back on the next join.</li>
+ *   <li>the owner logs in while the NPC lives: the NPC is removed and the owner takes its place, with the NPC's
+ *       current health and position, and gets everything back;</li>
+ *   <li>the NPC is killed: its drops follow {@code drop-inventory} / {@code drop-experience}, and the owner
+ *       <b>dies</b> on the next login (keeping whatever was not dropped);</li>
+ *   <li>the NPC expires, or the server restarts / crashes: the owner gets everything back on the next login.</li>
  * </ul>
  */
 public final class CitizensCombatNpcService implements CombatNpcService {
@@ -55,6 +61,10 @@ public final class CitizensCombatNpcService implements CombatNpcService {
     private final Map<UUID, ActiveNpc> active = new ConcurrentHashMap<>();
     private final Map<UUID, PendingEntry> pending = new ConcurrentHashMap<>();
     private final Map<String, Integer> ticketRefs = new ConcurrentHashMap<>();
+    /** Owners whose NPC was killed while they were offline: they die on their next login. */
+    private final Set<UUID> killed = ConcurrentHashMap.newKeySet();
+    /** Owners that die on login and keep what the NPC did not drop (consumed by the death event). */
+    private final Set<UUID> keepOnDeath = ConcurrentHashMap.newKeySet();
 
     public CitizensCombatNpcService(Plugin plugin, PluginConfig config) {
         this.plugin = plugin;
@@ -99,7 +109,7 @@ public final class CitizensCombatNpcService implements CombatNpcService {
 
         UUID owner = player.getUniqueId();
         // Leftovers of an earlier NPC must never be overwritten.
-        restorePending(player);
+        restorePending(player, false);
 
         ItemStack[] contents = player.getInventory().getContents();
         PendingEntry entry = new PendingEntry();
@@ -108,6 +118,7 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             if (item != null && !item.getType().isAir() && item.getAmount() > 0) entry.items.put(slot, item.clone());
         }
         entry.exp = Math.max(0, player.getTotalExperience());
+        entry.health = Math.max(1.0D, player.getHealth());
 
         NPC npc = null;
         ActiveNpc created = null;
@@ -133,6 +144,13 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             npcPlayer.setHealth(Math.max(1.0D, Math.min(maxHealth, player.getHealth())));
             npcPlayer.setAbsorptionAmount(player.getAbsorptionAmount());
             npcPlayer.setFallDistance(0.0F);
+
+            // The NPC must stay where the player logged out: full knockback resistance.
+            Attribute knockback = Registry.ATTRIBUTE.get(NamespacedKey.minecraft("knockback_resistance"));
+            if (knockback != null) {
+                AttributeInstance resistance = npcPlayer.getAttribute(knockback);
+                if (resistance != null) resistance.setBaseValue(1.0D);
+            }
 
             boolean ticket = config.npcKeepChunkLoaded() && acquireTicket(location);
             created = new ActiveNpc(npc, entity.getUniqueId(), location, ticket);
@@ -189,7 +207,14 @@ public final class CitizensCombatNpcService implements CombatNpcService {
         ActiveNpc npc = active.get(owner);
         if (npc == null || !npc.entityId().equals(entityId)) return;
         if (!active.remove(owner, npc)) return;
-        // The NPC survived: its owner gets the held items back on the next join (see pending.yml).
+        // The NPC survived: its owner gets the held items back on the next join (see pending.yml),
+        // together with the health the NPC had left.
+        LiveState live = captureLive(npc);
+        PendingEntry entry = pending.get(owner);
+        if (live != null && entry != null) {
+            entry.health = Math.max(1.0D, live.health());
+            savePending();
+        }
         releaseTicket(npc);
         destroyNpc(npc);
     }
@@ -213,6 +238,9 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             playerDeath.setKeepLevel(false);
         }
 
+        // The owner dies when they next log in.
+        killed.add(owner);
+
         PendingEntry entry = pending.get(owner);
         if (entry != null) {
             Location location = entity.getLocation();
@@ -226,8 +254,8 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             }
             // Whatever was not dropped stays reserved for the owner.
             if (entry.isEmpty()) pending.remove(owner);
-            savePending();
         }
+        savePending();
 
         releaseTicket(npc);
         try {
@@ -250,18 +278,63 @@ public final class CitizensCombatNpcService implements CombatNpcService {
 
     @Override
     public void handleJoin(Player player) {
-        // Login can only happen while an NPC exists when block-login-while-npc-exists is off.
-        // Remove the NPC so the same items cannot be obtained twice.
-        ActiveNpc npc = active.remove(player.getUniqueId());
+        UUID id = player.getUniqueId();
+
+        // The owner is back while the NPC still stands: they simply take its place.
+        ActiveNpc npc = active.remove(id);
+        LiveState live = npc == null ? null : captureLive(npc);
         if (npc != null) {
             releaseTicket(npc);
             destroyNpc(npc);
         }
-        restorePending(player);
+
+        if (killed.remove(id)) {
+            savePending();
+            PendingEntry entry = pending.get(id);
+            // Anything the NPC did not drop (drop-inventory / drop-experience disabled) is kept on death.
+            boolean keep = entry != null && !entry.isEmpty();
+            restorePending(player, false);
+            if (keep) keepOnDeath.add(id);
+            player.sendMessage(Text.color(config.message("npc-killed")));
+            player.getScheduler().runDelayed(plugin, task -> {
+                if (player.isOnline() && !player.isDead()) player.setHealth(0.0D);
+            }, null, 2L);
+            return;
+        }
+
+        restorePending(player, true);
+        if (live != null) applyLive(player, live);
     }
 
-    /** Returns held items and experience to the player. Must run on the player's thread. */
-    private void restorePending(Player player) {
+    @Override
+    public boolean consumeKeepOnDeath(UUID playerId) {
+        return keepOnDeath.remove(playerId);
+    }
+
+    /** Health, absorption and position of a still living NPC. Best effort: null if it cannot be read. */
+    private LiveState captureLive(ActiveNpc npc) {
+        try {
+            Entity entity = npc.npc().getEntity();
+            if (entity instanceof Player npcPlayer && !npcPlayer.isDead()) {
+                return new LiveState(npcPlayer.getHealth(), npcPlayer.getAbsorptionAmount(), npcPlayer.getLocation().clone());
+            }
+        } catch (Throwable ignored) {
+            // e.g. the NPC's chunk is unloaded or Folia refuses the cross-thread read
+        }
+        return null;
+    }
+
+    private void applyLive(Player player, LiveState live) {
+        double maxHealth = player.getMaxHealth();
+        player.setHealth(Math.max(1.0D, Math.min(maxHealth, live.health())));
+        player.setAbsorptionAmount(live.absorption());
+        if (live.location() != null && live.location().getWorld() != null) {
+            player.teleportAsync(live.location());
+        }
+    }
+
+    /** Returns held items, experience and health to the player. Must run on the player's thread. */
+    private void restorePending(Player player, boolean notify) {
         PendingEntry entry = pending.remove(player.getUniqueId());
         if (entry == null) return;
         savePending();
@@ -280,7 +353,10 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             }
         }
         if (entry.exp > 0) player.giveExp(entry.exp, false);
-        player.sendMessage(Text.color(config.message("npc-returned", "&a你戰鬥登出時留下的物品與經驗已歸還。")));
+        if (entry.health > 0.0D) {
+            player.setHealth(Math.max(1.0D, Math.min(player.getMaxHealth(), entry.health)));
+        }
+        if (notify) player.sendMessage(Text.color(config.message("npc-returned")));
     }
 
     // ------------------------------------------------------------------ NPC / chunk helpers
@@ -358,6 +434,7 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             if (section == null) continue;
             PendingEntry entry = new PendingEntry();
             entry.exp = Math.max(0, section.getInt("exp", 0));
+            entry.health = section.getDouble("health", -1.0D);
             ConfigurationSection items = section.getConfigurationSection("items");
             if (items != null) {
                 for (String slotKey : items.getKeys(false)) {
@@ -372,6 +449,13 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             }
             if (!entry.isEmpty()) pending.put(id, entry);
         }
+        for (String raw : yaml.getStringList("killed")) {
+            try {
+                killed.add(UUID.fromString(raw));
+            } catch (IllegalArgumentException ignored) {
+                // skip corrupt id
+            }
+        }
         if (!pending.isEmpty()) {
             plugin.getLogger().info("Loaded " + pending.size() + " pending combat-logout inventory record(s); they are returned on the owners' next login.");
         }
@@ -383,10 +467,14 @@ public final class CitizensCombatNpcService implements CombatNpcService {
             for (Map.Entry<UUID, PendingEntry> record : new ArrayList<>(pending.entrySet())) {
                 String base = "pending." + record.getKey();
                 yaml.set(base + ".exp", record.getValue().exp);
+                yaml.set(base + ".health", record.getValue().health);
                 for (Map.Entry<Integer, ItemStack> item : record.getValue().items.entrySet()) {
                     yaml.set(base + ".items." + item.getKey(), item.getValue());
                 }
             }
+            List<String> killedIds = new ArrayList<>();
+            for (UUID id : killed) killedIds.add(id.toString());
+            yaml.set("killed", killedIds);
             try {
                 File folder = dataFile.getParentFile();
                 if (folder != null && !folder.exists() && !folder.mkdirs()) {
@@ -421,9 +509,13 @@ public final class CitizensCombatNpcService implements CombatNpcService {
 
     private record ActiveNpc(NPC npc, UUID entityId, Location spawnLocation, boolean ticketHeld) { }
 
+    private record LiveState(double health, double absorption, Location location) { }
+
     private static final class PendingEntry {
         final Map<Integer, ItemStack> items = new LinkedHashMap<>();
         int exp;
+        /** Health to give back; negative = leave the player's own value. */
+        double health = -1.0D;
 
         boolean isEmpty() { return items.isEmpty() && exp <= 0; }
     }

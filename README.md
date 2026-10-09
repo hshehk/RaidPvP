@@ -14,6 +14,7 @@ RaidPvP is a standalone combat-management plugin designed for raiding / faction-
 ### Newbie protection
 - First-time players receive configurable protection.
 - The remaining time is saved when a player leaves (offline time does not count) and survives restarts.
+- A BossBar counts the protection down (`newbie.bossbar.*` in `config.yml`); the bar drains smoothly.
 - PvP protection can be enabled independently from full-damage protection.
 - `/newbie disable` lets a new player opt out.
 - Admins can add/remove/check protection.
@@ -36,12 +37,14 @@ RaidPvP is a standalone combat-management plugin designed for raiding / faction-
 
 ### Combat logging
 - `KILL`: combat logout directly kills the player.
-- `NPC`: with Citizens installed, creates a temporary player NPC that wears the logged-out player's inventory and keeps the player's health.
+- `NPC`: with Citizens installed, creates a temporary player NPC that wears the logged-out player's inventory and keeps the player's health. The NPC stands still (no knockback).
 - The inventory/XP are written to `plugins/RaidPvP/pending.yml` before the player data is cleared:
   - NPC killed + `drop-inventory` / `drop-experience`: that part is dropped.
   - NPC killed with drop disabled, NPC expired, server restart or crash: the owner gets everything back on the next login.
-- NPC mode blocks the same player from logging back in until the NPC is killed or expires, when enabled.
-  Expiry runs on the global scheduler, so an unloaded chunk can no longer lock a player out.
+- The owner may log in at any time and takes the NPC's place (NPC's current health and position, items returned).
+  `combat-log.block-login-while-npc-exists: true` blocks that instead.
+- If the NPC was killed, the owner **dies** on the next login (keeping whatever the NPC did not drop).
+- Expiry runs on the global scheduler, so an unloaded chunk can no longer lock a player out.
 - If Citizens is unavailable or NPC creation fails, the plugin falls back to `KILL`.
 - Combat-logout deaths never count for the anti kill-abuse limit.
 - Kicks by admins / restarts / bans / plugins are not punished (`combat-log.kick-exempt-causes`); a server shutdown never is.
@@ -84,3 +87,41 @@ For local development:
 ```bash
 gradle clean build
 ```
+
+## Messages
+- `plugins/RaidPvP/messages.yml` holds every chat message of the plugin (commands, restrictions, NPC, newbie...).
+  Missing keys fall back to the bundled defaults; messages found in an old `config.yml` are moved over once.
+- The combat ActionBar / BossBar texts stay in `config.yml` (`combat.actionbar.message`, `combat.bossbar.message`,
+  `newbie.bossbar.message`).
+- `%time%` is always a plain number. Write the unit yourself: `%time%s`, `%time% 秒`, ...
+  The newbie bar also knows `%minutes%` and `%mmss%` (e.g. `29:59`).
+
+## PlaceholderAPI (optional)
+All countdown placeholders return a plain number without unit.
+
+| Placeholder | Value |
+|---|---|
+| `%raidpvp_in_combat%` | `true` / `false` |
+| `%raidpvp_combat_time%` | seconds left in combat (0 if none) |
+| `%raidpvp_combat_enemy%` | opponent name |
+| `%raidpvp_newbie%` | `true` / `false` |
+| `%raidpvp_newbie_time%` | newbie protection seconds left |
+| `%raidpvp_newbie_minutes%` | minutes left, rounded up |
+| `%raidpvp_newbie_mmss%` | e.g. `29:59` |
+| `%raidpvp_pvp%` | `/pvp` state |
+
+## API for other plugins
+Add `softdepend: [RaidPvP]` to your plugin.yml, then:
+
+```java
+RaidPvPAPI api = RaidPvPAPI.get(); // null while RaidPvP is not enabled
+// or: Bukkit.getServicesManager().load(RaidPvPAPI.class)
+
+if (api != null && api.isNewbieProtected(player)) {
+    // e.g. refuse the duel invite
+}
+long seconds = api.getNewbieRemainingSeconds(player.getUniqueId());
+boolean fighting = api.isInCombat(player.getUniqueId());
+```
+
+Compile against the RaidPvP jar (`compileOnly files("libs/RaidPvP.jar")`). Methods taking a `UUID` are safe from any thread.

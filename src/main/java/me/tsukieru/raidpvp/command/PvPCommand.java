@@ -31,7 +31,7 @@ public final class PvPCommand implements CommandExecutor, TabCompleter {
             return true;
         }
         if (!config.pvpToggleEnabled()) {
-            player.sendMessage(Text.color("&cPvP 切換功能目前已關閉。"));
+            player.sendMessage(Text.color(config.message("pvp-toggle-disabled")));
             return true;
         }
         if (combat.isInCombat(player) && !player.hasPermission("raidpvp.bypass.combat")) {
@@ -49,7 +49,7 @@ public final class PvPCommand implements CommandExecutor, TabCompleter {
                 ? !combat.getPvpEnabled(player)
                 : args[0].equalsIgnoreCase("on") || args[0].equalsIgnoreCase("enable") || args[0].equalsIgnoreCase("true");
         if (args.length > 0 && !(enabled || args[0].equalsIgnoreCase("off") || args[0].equalsIgnoreCase("disable") || args[0].equalsIgnoreCase("false"))) {
-            player.sendMessage(Text.color("&e用法：/pvp [on|off]"));
+            player.sendMessage(Text.color(config.message("pvp-usage")));
             return true;
         }
 

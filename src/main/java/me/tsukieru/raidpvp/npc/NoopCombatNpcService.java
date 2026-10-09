@@ -14,6 +14,7 @@ public final class NoopCombatNpcService implements CombatNpcService {
     @Override public boolean isCombatNpc(Entity entity) { return false; }
     @Override public void handleNpcDeath(org.bukkit.event.entity.EntityDeathEvent event) { }
     @Override public void handleJoin(Player player) { }
+    @Override public boolean consumeKeepOnDeath(java.util.UUID playerId) { return false; }
 
     @Override
     public void handleCombatLogout(Player player, CombatState state) {

@@ -18,6 +18,12 @@ public interface CombatNpcService {
      */
     void handleJoin(Player player);
 
+    /**
+     * True once if this player is dying because their combat-logout NPC was killed and they keep what the NPC
+     * did not drop; the death event must then keep inventory and level.
+     */
+    boolean consumeKeepOnDeath(java.util.UUID playerId);
+
     void shutdown();
 
     static CombatNpcService create(Plugin plugin, me.tsukieru.raidpvp.config.PluginConfig config) {

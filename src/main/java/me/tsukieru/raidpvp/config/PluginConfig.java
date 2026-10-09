@@ -2,9 +2,16 @@ package me.tsukieru.raidpvp.config;
 
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -17,6 +24,7 @@ import java.util.Set;
 public final class PluginConfig {
     private final JavaPlugin plugin;
     private FileConfiguration config;
+    private volatile FileConfiguration messages;
 
     // Values that are read on hot paths (every damage / interact event) are parsed once per reload.
     private volatile Set<String> cachedDisabledWorlds = Set.of();
@@ -33,12 +41,91 @@ public final class PluginConfig {
 
     public void reload() {
         this.config = plugin.getConfig();
+        this.messages = loadMessages();
         this.cachedDisabledWorlds = Collections.unmodifiableSet(parseDisabledWorlds());
         this.cachedCommandList = Collections.unmodifiableSet(parseCommandList());
         this.cachedBlockedItems = Collections.unmodifiableSet(parseMaterials(config.getStringList("combat.restrictions.blocked-items")));
         this.cachedBlockedInteractMaterials = Collections.unmodifiableSet(parseMaterials(config.getStringList("combat.restrictions.blocked-interact-materials")));
         this.cachedItemCooldowns = Collections.unmodifiableMap(parseItemCooldowns());
         this.cachedKickExemptCauses = Collections.unmodifiableSet(parseKickExemptCauses());
+    }
+
+    // ------------------------------------------------------------------ messages.yml
+
+    /**
+     * Loads messages.yml. Missing keys fall back to the defaults bundled in the jar. The first time the file is
+     * created, messages that an older version stored in config.yml are carried over.
+     */
+    private FileConfiguration loadMessages() {
+        File file = new File(plugin.getDataFolder(), "messages.yml");
+        boolean created = false;
+        if (!file.exists()) {
+            plugin.saveResource("messages.yml", false);
+            created = true;
+        }
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        if (created) migrateLegacyMessages(yaml, file);
+        try (InputStream stream = plugin.getResource("messages.yml")) {
+            if (stream != null) {
+                yaml.setDefaults(YamlConfiguration.loadConfiguration(new InputStreamReader(stream, StandardCharsets.UTF_8)));
+            }
+        } catch (IOException exception) {
+            plugin.getLogger().warning("Could not read bundled messages.yml defaults: " + exception.getMessage());
+        }
+        return yaml;
+    }
+
+    private void migrateLegacyMessages(YamlConfiguration yaml, File file) {
+        boolean changed = false;
+        ConfigurationSection legacy = config.getConfigurationSection("messages");
+        if (legacy != null) {
+            for (String key : legacy.getKeys(false)) {
+                String value = legacy.getString(key);
+                if (value != null) {
+                    yaml.set(key, value);
+                    changed = true;
+                }
+            }
+        }
+        Map<String, String> oldPaths = Map.of(
+                "combat-enter", "combat.messages.on-enter",
+                "combat-exit", "combat.messages.on-exit",
+                "on-attack-newbie", "combat.messages.on-attack-newbie",
+                "combat-log-broadcast", "combat-log.broadcast-message",
+                "newbie-join", "newbie.message.join",
+                "newbie-disabled", "newbie.message.disabled",
+                "newbie-time", "newbie.message.time",
+                "newbie-protected", "newbie.message.protected"
+        );
+        for (Map.Entry<String, String> entry : oldPaths.entrySet()) {
+            String value = config.getString(entry.getValue());
+            if (value != null) {
+                yaml.set(entry.getKey(), value);
+                changed = true;
+            }
+        }
+        if (changed) {
+            try {
+                yaml.save(file);
+                plugin.getLogger().info("Moved existing plugin messages from config.yml to messages.yml.");
+            } catch (IOException exception) {
+                plugin.getLogger().warning("Could not save migrated messages.yml: " + exception.getMessage());
+            }
+        }
+    }
+
+    /** A message from messages.yml; {@code fallback} is only used if the key exists nowhere. */
+    public String message(String key, String fallback) {
+        String value = messages.getString(key);
+        return value != null ? value : fallback;
+    }
+
+    public String message(String key) {
+        return message(key, "&c[missing message: " + key + "]");
+    }
+
+    public List<String> messageList(String key) {
+        return new ArrayList<>(messages.getStringList(key));
     }
 
     /** Worlds in which RaidPvP does nothing at all (no PvP rules, no combat tag). */
@@ -75,8 +162,8 @@ public final class PluginConfig {
         try { return org.bukkit.boss.BarStyle.valueOf(config.getString("combat.bossbar.style", "SOLID").toUpperCase(Locale.ROOT)); }
         catch (IllegalArgumentException exception) { return org.bukkit.boss.BarStyle.SOLID; }
     }
-    public String combatEnterMessage() { return config.getString("combat.messages.on-enter", "&c⚔ 你進入戰鬥！ &7(%time%s)"); }
-    public String combatExitMessage() { return config.getString("combat.messages.on-exit", "&a✔ 你已脫離戰鬥。"); }
+    public String combatEnterMessage() { return message("combat-enter"); }
+    public String combatExitMessage() { return message("combat-exit"); }
 
     public boolean blockCommandsInCombat() { return config.getBoolean("combat.restrictions.block-commands", true); }
     public boolean commandWhitelistMode() { return config.getString("combat.restrictions.command-mode", "BLACKLIST").equalsIgnoreCase("WHITELIST"); }
@@ -126,7 +213,7 @@ public final class PluginConfig {
 
     public String combatLogMode() { return config.getString("combat-log.mode", "KILL").toUpperCase(Locale.ROOT); }
     public boolean punishOnKick() { return config.getBoolean("combat-log.punish-on-kick", true); }
-    public boolean blockLoginWhileNpc() { return config.getBoolean("combat-log.block-login-while-npc-exists", true); }
+    public boolean blockLoginWhileNpc() { return config.getBoolean("combat-log.block-login-while-npc-exists", false); }
     /** PlayerKickEvent.Cause names that never count as combat logging (admin kicks, restarts, bans...). */
     public Set<String> kickExemptCauses() { return cachedKickExemptCauses; }
 
@@ -142,7 +229,7 @@ public final class PluginConfig {
     }
 
     public boolean combatLogBroadcast() { return config.getBoolean("combat-log.broadcast", true); }
-    public String combatLogBroadcastMessage() { return config.getString("combat-log.broadcast-message", "&c%player% &7戰鬥中登出。"); }
+    public String combatLogBroadcastMessage() { return message("combat-log-broadcast"); }
     public String npcName() { return config.getString("combat-log.npc.name", "%player%"); }
     public long npcDespawnSeconds() { return Math.max(1L, config.getLong("combat-log.npc.despawn-seconds", 120L)); }
     public boolean npcDropInventory() { return config.getBoolean("combat-log.npc.drop-inventory", true); }
@@ -154,10 +241,22 @@ public final class PluginConfig {
     public boolean newbieProtectFromPvp() { return config.getBoolean("newbie.protect-from-pvp", true); }
     public boolean newbieProtectFromEverything() { return config.getBoolean("newbie.protect-from-everything", false); }
     public boolean newbieBlockPickup() { return config.getBoolean("newbie.block-pickup", false); }
-    public String newbieJoinMessage() { return config.getString("newbie.message.join", "&a新手保護啟動：&f%time% 分鐘&a。"); }
-    public String newbieDisabledMessage() { return config.getString("newbie.message.disabled", "&c你已關閉新手保護。"); }
-    public String newbieTimeMessage() { return config.getString("newbie.message.time", "&e新手保護剩餘 &f%time% &e秒。"); }
-    public String newbieProtectedMessage() { return config.getString("newbie.message.protected", "&e你目前受到新手保護，無法參與 PvP。"); }
+    public String newbieJoinMessage() { return message("newbie-join"); }
+    public String newbieDisabledMessage() { return message("newbie-disabled"); }
+    public String newbieTimeMessage() { return message("newbie-time"); }
+    public String newbieProtectedMessage() { return message("newbie-protected"); }
+    public String newbieEndedMessage() { return message("newbie-ended"); }
+
+    public boolean newbieBossbarEnabled() { return config.getBoolean("newbie.bossbar.enabled", true); }
+    public String newbieBossbarMessage() { return config.getString("newbie.bossbar.message", "&a🛡 新手保護 &7| &f%mmss%"); }
+    public org.bukkit.boss.BarColor newbieBossbarColor() {
+        try { return org.bukkit.boss.BarColor.valueOf(config.getString("newbie.bossbar.color", "GREEN").toUpperCase(Locale.ROOT)); }
+        catch (IllegalArgumentException exception) { return org.bukkit.boss.BarColor.GREEN; }
+    }
+    public org.bukkit.boss.BarStyle newbieBossbarStyle() {
+        try { return org.bukkit.boss.BarStyle.valueOf(config.getString("newbie.bossbar.style", "SOLID").toUpperCase(Locale.ROOT)); }
+        catch (IllegalArgumentException exception) { return org.bukkit.boss.BarStyle.SOLID; }
+    }
 
     public boolean respawnProtectionEnabled() { return config.getBoolean("respawn-protection.enabled", true); }
     public long respawnProtectionNanos() { return Math.max(0L, config.getLong("respawn-protection.seconds", 2L)) * 1_000_000_000L; }
@@ -166,7 +265,6 @@ public final class PluginConfig {
     public long killAbuseWindowNanos() { return Math.max(1L, config.getLong("anti-kill-abuse.window-seconds", 60L)) * 1_000_000_000L; }
     public String killAbuseCommand() { return config.getString("anti-kill-abuse.command", "kick %player% &c禁止短時間重複擊殺同一玩家。"); }
 
-    public String message(String key, String fallback) { return config.getString("messages." + key, fallback); }
 
     private Set<Material> parseMaterials(List<String> raw) {
         Set<Material> materials = new HashSet<>();

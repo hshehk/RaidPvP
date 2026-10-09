@@ -7,6 +7,7 @@ author: Tsukieru
 description: Production-ready combat manager for raiding PvP servers.
 softdepend:
   - Citizens
+  - PlaceholderAPI
 commands:
   raidpvp:
     description: RaidPvP administration and status commands.

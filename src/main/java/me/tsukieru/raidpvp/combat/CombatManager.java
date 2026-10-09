@@ -18,6 +18,7 @@ import org.bukkit.plugin.Plugin;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,10 @@ public final class CombatManager {
     private final Map<UUID, ScheduledTask> combatUiTasks = new ConcurrentHashMap<>();
     private final Map<UUID, BossBar> bossBars = new ConcurrentHashMap<>();
     private final Map<UUID, Long> newbie = new ConcurrentHashMap<>();
+    /** Length of the protection a player started with; only used to scale the newbie boss bar. */
+    private final Map<UUID, Long> newbieTotals = new ConcurrentHashMap<>();
+    private final Map<UUID, ScheduledTask> newbieUiTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, BossBar> newbieBars = new ConcurrentHashMap<>();
     private final Map<UUID, Long> respawnProtection = new ConcurrentHashMap<>();
     private final Map<UUID, Long> pvpToggleAt = new ConcurrentHashMap<>();
     private final Map<UUID, Map<UUID, Deque<Long>>> killHistory = new ConcurrentHashMap<>();
@@ -57,7 +62,6 @@ public final class CombatManager {
                     combat.forEach((uuid, state) -> {
                         if (state.expiresAtNanos() <= now) endCombatIf(uuid, state, true);
                     });
-                    newbie.entrySet().removeIf(entry -> entry.getValue() <= now);
                     respawnProtection.entrySet().removeIf(entry -> entry.getValue() <= now);
                     long cooldown = config.pvpToggleCooldownNanos();
                     pvpToggleAt.entrySet().removeIf(entry -> now - entry.getValue() >= cooldown);
@@ -147,7 +151,9 @@ public final class CombatManager {
     public void startNewbie(Player player) {
         if (!config.newbieEnabled() || player.hasPermission("raidpvp.bypass.newbie")) return;
         newbie.put(player.getUniqueId(), System.nanoTime() + config.newbieDurationNanos());
+        newbieTotals.put(player.getUniqueId(), config.newbieDurationNanos());
         saveNewbie(player);
+        startNewbieUi(player);
         long minutes = Math.max(1L, config.newbieDurationNanos() / 60_000_000_000L);
         send(player, Text.replace(config.newbieJoinMessage(), "%time%", String.valueOf(minutes)));
     }
@@ -157,7 +163,10 @@ public final class CombatManager {
         if (!config.newbieEnabled() || player.hasPermission("raidpvp.bypass.newbie")) return;
         Long remainingMs = player.getPersistentDataContainer().get(newbieRemainingKey, PersistentDataType.LONG);
         if (remainingMs == null || remainingMs <= 0L) return;
-        newbie.put(player.getUniqueId(), System.nanoTime() + remainingMs * 1_000_000L);
+        long remainingNanos = remainingMs * 1_000_000L;
+        newbie.put(player.getUniqueId(), System.nanoTime() + remainingNanos);
+        newbieTotals.put(player.getUniqueId(), Math.max(config.newbieDurationNanos(), remainingNanos));
+        startNewbieUi(player);
     }
 
     /** Persists the remaining protection time (offline time does not count). Must run on the player's thread. */
@@ -169,17 +178,112 @@ public final class CombatManager {
     }
 
     public void addNewbie(UUID uuid, long durationMinutes) {
-        newbie.put(uuid, System.nanoTime() + Math.max(1L, durationMinutes) * 60_000_000_000L);
+        long nanos = Math.max(1L, durationMinutes) * 60_000_000_000L;
+        newbie.put(uuid, System.nanoTime() + nanos);
+        newbieTotals.put(uuid, nanos);
         Player player = Bukkit.getPlayer(uuid);
-        if (player != null) player.getScheduler().run(plugin, task -> saveNewbie(player), null);
+        if (player != null) {
+            player.getScheduler().run(plugin, task -> {
+                saveNewbie(player);
+                startNewbieUi(player);
+            }, null);
+        }
     }
 
     public void removeNewbie(UUID uuid) {
         newbie.remove(uuid);
+        newbieTotals.remove(uuid);
         Player player = Bukkit.getPlayer(uuid);
         if (player != null) {
-            player.getScheduler().run(plugin, task -> player.getPersistentDataContainer().remove(newbieRemainingKey), null);
+            player.getScheduler().run(plugin, task -> {
+                player.getPersistentDataContainer().remove(newbieRemainingKey);
+                stopNewbieUi(player);
+            }, null);
         }
+    }
+
+    // ------------------------------------------------------------------ newbie boss bar
+
+    /** (Re)starts the per-tick newbie countdown. Must run on the player's thread. */
+    private void startNewbieUi(Player player) {
+        UUID uuid = player.getUniqueId();
+        stopNewbieUi(player);
+        if (!config.newbieEnabled()) return;
+
+        long[] lastSecond = {-1L};
+        long[] lastUntil = {0L};
+        ScheduledTask task = player.getScheduler().runAtFixedRate(plugin, scheduled -> {
+            long now = System.nanoTime();
+            if (!player.isOnline()) {
+                scheduled.cancel();
+                newbieUiTasks.remove(uuid, scheduled);
+                removeNewbieBar(player);
+                return;
+            }
+
+            Long until = newbie.get(uuid);
+            if (until == null) {
+                // Removed by /newbie disable, an admin, or lazily after it ran out.
+                scheduled.cancel();
+                newbieUiTasks.remove(uuid, scheduled);
+                removeNewbieBar(player);
+                if (lastUntil[0] != 0L && lastUntil[0] <= now) finishNewbie(player);
+                return;
+            }
+            lastUntil[0] = until;
+
+            long remaining = until - now;
+            if (remaining <= 0L) {
+                newbie.remove(uuid, until);
+                scheduled.cancel();
+                newbieUiTasks.remove(uuid, scheduled);
+                removeNewbieBar(player);
+                finishNewbie(player);
+                return;
+            }
+
+            if (!config.newbieBossbarEnabled()) {
+                removeNewbieBar(player);
+                return;
+            }
+
+            long seconds = (remaining + 999_999_999L) / 1_000_000_000L;
+            boolean isNew = !newbieBars.containsKey(uuid);
+            BossBar bar = newbieBars.computeIfAbsent(uuid, ignored -> Bukkit.createBossBar(
+                    "", config.newbieBossbarColor(), config.newbieBossbarStyle()));
+            if (!bar.getPlayers().contains(player)) bar.addPlayer(player);
+
+            // Progress is updated every tick, so the bar drains smoothly instead of stepping once a second.
+            long total = Math.max(newbieTotals.getOrDefault(uuid, config.newbieDurationNanos()), remaining);
+            bar.setProgress(Math.max(0.0D, Math.min(1.0D, remaining / (double) total)));
+
+            if (isNew || seconds != lastSecond[0]) {
+                lastSecond[0] = seconds;
+                String text = Text.replace(config.newbieBossbarMessage(),
+                        "%time%", String.valueOf(seconds),
+                        "%minutes%", String.valueOf((seconds + 59L) / 60L),
+                        "%mmss%", String.format("%d:%02d", seconds / 60L, seconds % 60L));
+                bar.setTitle(LegacyComponentSerializer.legacySection().serialize(Text.color(text)));
+            }
+        }, null, 1L, 1L);
+        if (task != null) newbieUiTasks.put(uuid, task);
+    }
+
+    private void finishNewbie(Player player) {
+        newbieTotals.remove(player.getUniqueId());
+        player.getPersistentDataContainer().remove(newbieRemainingKey);
+        sendNow(player, config.newbieEndedMessage());
+    }
+
+    private void stopNewbieUi(Player player) {
+        ScheduledTask task = newbieUiTasks.remove(player.getUniqueId());
+        if (task != null) task.cancel();
+        removeNewbieBar(player);
+    }
+
+    private void removeNewbieBar(Player player) {
+        BossBar bar = newbieBars.remove(player.getUniqueId());
+        if (bar != null) bar.removeAll();
     }
 
     // ------------------------------------------------------------------ respawn protection
@@ -267,6 +371,8 @@ public final class CombatManager {
 
     private void startCombatUiTask(Player player) {
         UUID uuid = player.getUniqueId();
+        long[] lastSecond = {-1L};
+        String[] lastEnemy = {null};
         combatUiTasks.computeIfAbsent(uuid, ignored -> player.getScheduler().runAtFixedRate(
                 plugin,
                 task -> {
@@ -278,43 +384,52 @@ public final class CombatManager {
                         return;
                     }
 
-                    long remaining = remainingSeconds(uuid);
-                    if (remaining <= 0L) {
+                    long remainingNanos = state.expiresAtNanos() - System.nanoTime();
+                    if (remainingNanos <= 0L) {
                         // If the tag was refreshed meanwhile this does nothing and the task simply keeps running.
                         endCombatIf(uuid, state, true);
                         return;
                     }
 
-                    if (config.actionbarEnabled()) {
-                        player.sendActionBar(Text.color(Text.replace(config.actionbarMessage(),
-                                "%time%", String.valueOf(remaining),
-                                "%enemy%", state.opponentName())));
+                    long seconds = (remainingNanos + 999_999_999L) / 1_000_000_000L;
+                    boolean textChanged = seconds != lastSecond[0] || !Objects.equals(lastEnemy[0], state.opponentName());
+                    if (textChanged) {
+                        lastSecond[0] = seconds;
+                        lastEnemy[0] = state.opponentName();
+                        if (config.actionbarEnabled()) {
+                            player.sendActionBar(Text.color(Text.replace(config.actionbarMessage(),
+                                    "%time%", String.valueOf(seconds),
+                                    "%enemy%", state.opponentName())));
+                        }
                     }
-                    updateBossBar(player, state, remaining);
+                    updateBossBar(player, state, remainingNanos, seconds, textChanged);
                 },
                 null,
                 1L, // Paper/Folia reject an initial delay <= 0
-                20L
+                1L  // every tick: the boss bar drains smoothly, the text only changes once a second
         ));
     }
 
-    private void updateBossBar(Player player, CombatState state, long remainingSeconds) {
+    private void updateBossBar(Player player, CombatState state, long remainingNanos, long seconds, boolean refreshTitle) {
         if (!config.bossbarEnabled()) {
             removeBossBar(player);
             return;
         }
+        boolean isNew = !bossBars.containsKey(player.getUniqueId());
         BossBar bar = bossBars.computeIfAbsent(player.getUniqueId(), ignored -> Bukkit.createBossBar(
                 "",
                 config.bossbarColor(),
                 config.bossbarStyle()
         ));
         if (!bar.getPlayers().contains(player)) bar.addPlayer(player);
-        double total = Math.max(1.0D, state.durationNanos() / 1_000_000_000.0D);
-        bar.setProgress(Math.max(0.0D, Math.min(1.0D, remainingSeconds / total)));
-        Component title = Text.color(Text.replace(config.bossbarMessage(),
-                "%time%", String.valueOf(remainingSeconds),
-                "%enemy%", state.opponentName()));
-        bar.setTitle(LegacyComponentSerializer.legacySection().serialize(title));
+        double total = Math.max(1.0D, (double) state.durationNanos());
+        bar.setProgress(Math.max(0.0D, Math.min(1.0D, remainingNanos / total)));
+        if (isNew || refreshTitle) {
+            Component title = Text.color(Text.replace(config.bossbarMessage(),
+                    "%time%", String.valueOf(seconds),
+                    "%enemy%", state.opponentName()));
+            bar.setTitle(LegacyComponentSerializer.legacySection().serialize(title));
+        }
     }
 
     private void removeBossBar(Player player) {
@@ -427,7 +542,9 @@ public final class CombatManager {
     /** Quit bookkeeping that is independent of combat. Player thread. */
     public void handleQuit(Player player) {
         saveNewbie(player);
+        stopNewbieUi(player);
         newbie.remove(player.getUniqueId());
+        newbieTotals.remove(player.getUniqueId());
         respawnProtection.remove(player.getUniqueId());
     }
 
@@ -475,6 +592,10 @@ public final class CombatManager {
         if (maintenanceTask != null) maintenanceTask.cancel();
         combatUiTasks.values().forEach(ScheduledTask::cancel);
         combatUiTasks.clear();
+        newbieUiTasks.values().forEach(ScheduledTask::cancel);
+        newbieUiTasks.clear();
+        newbieBars.values().forEach(BossBar::removeAll);
+        newbieBars.clear();
 
         // Best effort: give everybody their flight / game mode back and keep newbie time across restarts.
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -491,6 +612,7 @@ public final class CombatManager {
         bossBars.clear();
         combat.clear();
         newbie.clear();
+        newbieTotals.clear();
         respawnProtection.clear();
         pvpToggleAt.clear();
         killHistory.clear();

@@ -42,7 +42,7 @@ public final class PlayerListener implements Listener {
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         if (config.blockLoginWhileNpc() && npcService.hasActiveNpc(event.getUniqueId())) {
             event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER,
-                    Text.color("&c你目前仍有戰鬥登出 NPC 存在。\n&e請等 NPC 被擊殺或自然消失後再登入。"));
+                    Text.color(config.message("npc-login-blocked")));
         }
     }
 
@@ -72,7 +72,16 @@ public final class PlayerListener implements Listener {
      */
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onNpcPlayerDeath(PlayerDeathEvent event) {
-        if (npcService.isCombatNpc(event.getEntity())) npcService.handleNpcDeath(event);
+        Player dying = event.getEntity();
+        if (npcService.isCombatNpc(dying)) {
+            npcService.handleNpcDeath(event);
+        } else if (npcService.consumeKeepOnDeath(dying.getUniqueId())) {
+            // Died on login because the combat-logout NPC was killed: keep whatever the NPC did not drop.
+            event.setKeepInventory(true);
+            event.getDrops().clear();
+            event.setKeepLevel(true);
+            event.setDroppedExp(0);
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
